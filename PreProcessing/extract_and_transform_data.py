@@ -64,8 +64,8 @@ def extractData(InputDicomFolder, OutputLocation):
     mask = img == 255
     img[mask] = 0
 
-    plt.imshow(img[6,:,:], cmap='gray')
-    plt.show()
+    # plt.imshow(img[6,:,:], cmap='gray')
+    # plt.show()
     
     from skimage.util.shape import view_as_windows
  
@@ -73,7 +73,7 @@ def extractData(InputDicomFolder, OutputLocation):
                         [1, 1, 1],
                         [0, 1, 0]], dtype=np.uint8)
     
-    print(img.shape)
+    # print(img.shape)
 
     # Get indices of non-zero elements in the kernel
     plus_indices = np.argwhere(plus_kernel)
@@ -142,9 +142,42 @@ def extractData(InputDicomFolder, OutputLocation):
             if 0 <= nx < rows and 0 <= ny < cols:
                 grid[nx][ny] = 0
         return grid
+    
+    def apply_3x3_average(image, x, y):
+        rows, cols = image.shape
+        kernel_values = []
+
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < rows and 0 <= ny < cols:
+                    kernel_values.append(image[nx, ny])
+
+        # Compute average and assign to center pixel
+        if kernel_values:
+            image[x, y] = np.mean(kernel_values)
+            
+        return image
                 
     for pt in plus_centers:
         img[6,:,:] = zero_out_neighbors(img[6,:,:], pt[1], pt[0])
+        
+        directions = [
+        (-1, -1), (-1, 0), (-1, 1),
+        ( 0, -1),  (0,0),  ( 0, 1),
+        ( 1, -1), ( 1, 0), ( 1, 1)
+        ]  
+
+
+        for _ in range(3):
+            for dx, dy in directions:
+                nx, ny = pt[1] + dx, pt[0] + dy
+                
+                img[6,:,:] = apply_3x3_average(img[6,:,:], nx,ny)
+            
+       
+       
+        plt.imsave( rf"W:\strahlenklinik\science\Physik\Arkaniva\Prostataexport Arkaniva Sarkar\Test\{ InputDicomFolder.split('\\')[-1]}.png", img[6,:,:] , cmap='gray')   
 
     #print(plus_centers)
     
@@ -189,11 +222,11 @@ def extractData(InputDicomFolder, OutputLocation):
         
         
 
-    plt.scatter(plus_centers[:, 0], plus_centers[:, 1], color='red', s=10)
-    #
-    # 
-    # plt.imshow(img[6,:,:], cmap='gray')
-    plt.show()
+    # plt.scatter(plus_centers[:, 0], plus_centers[:, 1], color='red', s=10)
+    # #
+    # # 
+    # # plt.imshow(img[6,:,:], cmap='gray')
+    # plt.show()
     
     
         
@@ -395,11 +428,11 @@ if __name__ == '__main__':
     SeriesUIDFolders = r"W:\strahlenklinik\science\Physik\Arkaniva\Prostataexport Arkaniva Sarkar\Filtered Data"
     OutputFolder = r"W:\strahlenklinik\science\Physik\Arkaniva\Prostataexport Arkaniva Sarkar\Transformed Data"
     
-    i = 0
+    # i = 0
     for seriesFolder in os.listdir(SeriesUIDFolders):
-        i+=1
-        if i<871:
-            continue
+        # i+=1
+        # if i<333:
+        #     continue
         
         # Create series folder if not already present
         if not os.path.exists(f'{OutputFolder}\\{seriesFolder}'):
@@ -408,7 +441,7 @@ if __name__ == '__main__':
         
         extractData(f'{SeriesUIDFolders}\\{seriesFolder}', f'{OutputFolder}\\{seriesFolder}')
         
-        break
+        # break
 
     
 
