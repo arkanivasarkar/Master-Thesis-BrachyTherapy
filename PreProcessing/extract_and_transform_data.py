@@ -58,15 +58,159 @@ def extractData(InputDicomFolder, OutputLocation):
     # Extract pixel matrix
     pixel_arrays = [ds.pixel_array for ds in dicom_files] 
     pixel_matrix = np.stack(pixel_arrays, axis=0) # [Z,Y,X] or [slice, column, row]
+    
+    img = (pixel_matrix // 5) * 5
+    
+    mask = img == 255
+    img[mask] = 0
+
+    plt.imshow(img[6,:,:], cmap='gray')
+    plt.show()
+    
+    from skimage.util.shape import view_as_windows
+ 
+    plus_kernel = np.array([[0, 1, 0],
+                        [1, 1, 1],
+                        [0, 1, 0]], dtype=np.uint8)
+    
+    print(img.shape)
+
+    # Get indices of non-zero elements in the kernel
+    plus_indices = np.argwhere(plus_kernel)
+
+    # Extract 3x3 sliding windows over the image
+    windows = view_as_windows(img[6,:,:], (3, 3))
+
+    # Initialize mask for detected plus centers
+    result_mask = np.zeros_like(img[6,:,:], dtype=bool)
+    plus_centers = []
+    
+    
+    # Loop over valid positions in the image
+    for i in range(windows.shape[0]):
+        for j in range(windows.shape[1]):
+            patch = windows[i, j]
+            values = patch[plus_kernel == 1]
+            if np.all(values == values[0]) and 200 <= values[0] <= 255:
+                center_y, center_x = i + 1, j + 1  # center of 3x3 patch
+                plus_centers.append((center_x, center_y))  # x first for plotting
+                
+                
+                # Mark the 5 corresponding positions as True
+                for dy, dx in plus_indices:
+                    result_mask[i + dy, j + dx] = True
+        
+    plus_centers = np.array(plus_centers)
+    
+    tolerance = 3
+    spacing = int(5//dicom_files[0].PixelSpacing[0])
+    
+    from collections import defaultdict
+
+    def filter_aligned_points(points):
+        x_groups = defaultdict(list)  # points with the same x
+        y_groups = defaultdict(list)  # points with the same y
+
+        for x, y in points:
+            x_groups[x].append((x, y))
+            y_groups[y].append((x, y))
+
+        result = set()
+
+        for group in x_groups.values():
+            if len(group) > 8:
+                result.update(group)
+
+        for group in y_groups.values():
+            if len(group) > 8:
+                result.update(group)
+
+        return np.array(list(result))
+    
+    
+    plus_centers = filter_aligned_points(plus_centers)
+   
+    def zero_out_neighbors(grid, x, y):
+        rows = len(grid)
+        cols = len(grid[0]) if rows > 0 else 0
+
+        directions = [(-1, 0), (1, 0), (0, -1), (0, 1), (0,0)]  # up, down, left, right
+
+        for dx, dy in directions:
+            nx, ny = x + dx, y + dy
+
+            if 0 <= nx < rows and 0 <= ny < cols:
+                grid[nx][ny] = 0
+        return grid
+                
+    for pt in plus_centers:
+        img[6,:,:] = zero_out_neighbors(img[6,:,:], pt[1], pt[0])
+
+    #print(plus_centers)
+    
+    # coords=[]
+    # for centers in plus_centers:
+        
+    #     plt.scatter(centers[0], centers[1], color='red', s=10)
+    #     plt.imshow(result_mask, cmap='gray')
+    #     plt.show()
+        
+        
+    #     x_diff = np.abs(plus_centers[:, 0] - centers[0])
+    #     y_diff = np.abs(plus_centers[:, 1] - centers[1])
+
+    #     # Check if any x or y difference is between 41 and 43
+    #     mask = ((x_diff >= spacing-1) & (x_diff <= spacing+1) & y_diff==0) & (x_diff==0 & (y_diff >= spacing-1) & (y_diff <= spacing+1))
+
+    #     # distances = np.round(np.linalg.norm(plus_centers - centers, axis=1))
+    #     # #print(distances)
+    #     # mask = (distances >= spacing-1) & (distances <= spacing+1)
+        
+    #     #print(plus_centers.shape)
+    #     if 2<=mask.sum()<=4:
+    #         print(plus_centers[mask])
+    #         coords.append(centers)
+            
+    #         pt=plus_centers[mask]
+            
+    #         print( np.round(np.linalg.norm(pt - centers, axis=1)))
+    #         plt.scatter(centers[0], centers[1], color='red', s=10)
+    #         plt.scatter(pt[:,0], pt[:,1], color='green', s=10)
+    #         plt.imshow(result_mask, cmap='gray')
+    #         plt.show()
+    #         break
+        
+        
+    # plus_centers = np.array(coords)
+
+        
+        
+        
+        
+        
+
+    plt.scatter(plus_centers[:, 0], plus_centers[:, 1], color='red', s=10)
+    #
+    # 
+    # plt.imshow(img[6,:,:], cmap='gray')
+    plt.show()
+    
+    
+        
+    return
    
 
     # Transpose array to [X, Y, Z] for saving as NifTI using nibabel
     pixel_matrix_ras = np.transpose(pixel_matrix, (2, 1, 0))  # [Z, Y, X] → [X, Y, Z]
 
     # Save as NIfTI
-    nifti_image = nib.Nifti1Image(pixel_matrix_ras, affine_ras)
-    nib.save(nifti_image, f'{OutputLocation}\\image.nii')
+    #nifti_image = nib.Nifti1Image(pixel_matrix_ras, affine_ras)
+    #nib.save(nifti_image, f'{OutputLocation}\\image.nii')
     
+
+    
+    
+    return
 
     # Load RT-STRUCT DICOM file to extract anatomy contours
     try:
@@ -145,8 +289,8 @@ def extractData(InputDicomFolder, OutputLocation):
 
         # Save masks as NIFTI files
         nifti_img = nib.Nifti1Image(mask_volume, affine_ras)
-        roi_name = roi_name.replace('/', '-').replace('\\', '-').replace('?', '-')
-        nib.save(nifti_img,f'{OutputLocation}\\{roi_name}.nii')
+        # roi_name = roi_name.replace('/', '-').replace('\\', '-').replace('?', '-')
+        # nib.save(nifti_img,f'{OutputLocation}\\{roi_name}.nii')
         
         
 
@@ -158,6 +302,61 @@ def extractData(InputDicomFolder, OutputLocation):
     except:
         print(f'Needle DICOM could not be read: {dicom_files[0].PatientName} - {InputDicomFolder.split('\\')[-1]}')
         return
+    
+   
+    catheter_reconstructed = []  # Stores individual catheter paths
+   
+    private_tag = ds[0x300f, 0x1000].value
+    structures = private_tag[0][0x3006, 0x0039].value
+
+    k=0
+    for struct in structures:
+        contour_seq = struct.ContourSequence
+        if len(contour_seq) == 1:
+            contour_data = contour_seq[0].ContourData
+            points = []
+
+            
+
+            # Extract 3D points in order: x, z, -y (flipping Y-axis)
+            for i in range(0, len(contour_data), 3):
+                point = [float(contour_data[i]), float(contour_data[i + 1]), float(contour_data[i + 2])]
+                points.append(point)
+                
+
+
+            catheter_reconstructed.append(points)
+            
+                            
+            points=np.array(points)
+            print(points)
+            print('-------------------')
+            start = points[0]
+            end = points[1]
+            points = np.array([list(start + (end - start) * t) for t in np.linspace(0, 1, 16)])
+            print(points)
+        
+        break
+        
+
+    print(f"Number of reconstructed catheters: {len(catheter_reconstructed)}")
+    
+    # for struct in value:
+    #     print(1)
+    #     contour_seq = struct.ROIContourSequence
+        
+    #     for c in contour_seq:
+    #         print(len(c.ContourSequence))
+    #         print('ooooooooooooooooooooooooo')
+        #print(contour_seq)
+    
+    # private_tag = ds[0x300f, 0x1000].value
+    # structures = ds[0x3006, 0x0082].value
+    
+    # print(private_tag)
+    # print(structures)
+    
+    return 
 
 
     num_needles = len(ds.ApplicationSetupSequence[0].ChannelSequence)
@@ -196,7 +395,11 @@ if __name__ == '__main__':
     SeriesUIDFolders = r"W:\strahlenklinik\science\Physik\Arkaniva\Prostataexport Arkaniva Sarkar\Filtered Data"
     OutputFolder = r"W:\strahlenklinik\science\Physik\Arkaniva\Prostataexport Arkaniva Sarkar\Transformed Data"
     
+    i = 0
     for seriesFolder in os.listdir(SeriesUIDFolders):
+        i+=1
+        if i<871:
+            continue
         
         # Create series folder if not already present
         if not os.path.exists(f'{OutputFolder}\\{seriesFolder}'):
@@ -204,6 +407,8 @@ if __name__ == '__main__':
 
         
         extractData(f'{SeriesUIDFolders}\\{seriesFolder}', f'{OutputFolder}\\{seriesFolder}')
+        
+        break
 
     
 
