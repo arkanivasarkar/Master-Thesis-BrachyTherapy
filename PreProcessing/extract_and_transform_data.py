@@ -8,6 +8,7 @@ import pydicom
 from skimage.draw import polygon2mask
 from scipy.ndimage import distance_transform_edt
 
+
 def signed_distance(mask):
     mask = (mask > 0).astype(np.uint8)
     dist_out = distance_transform_edt(mask == 0)
@@ -59,9 +60,37 @@ def extractData(InputDicomFolder, OutputLocation):
     pixel_arrays = [ds.pixel_array for ds in dicom_files] 
     pixel_matrix = np.stack(pixel_arrays, axis=0) # [Z,Y,X] or [slice, column, row]
     
-    img = (pixel_matrix // 5) * 5
     
-    mask = img == 255
+    # Bin intensities in factors of 5 for easier denoising
+    bin_size = 5
+    pixel_matrix_binned = (pixel_matrix.copy() // bin_size) * bin_size
+    
+    
+    # Denoise Hand-drawn prostate contour (observed that it is always 255 after binning)
+    mask = pixel_matrix_binned == 255
+    
+    # z_idx, y_idx, x_idx = np.where(mask)
+    
+    # slice_index = 5
+    # slice_image = pixel_matrix_binned[slice_index]
+
+    # # Filter the coordinates for points in the 6th slice
+    # mask_slice = z_idx == slice_index
+    # x_points = x_idx[mask_slice]
+    # y_points = y_idx[mask_slice]
+
+    # # Plot the slice and the points
+    # plt.figure(figsize=(8, 6))
+    # plt.imshow(slice_image, cmap='gray')
+    # plt.scatter(x_points, y_points, color='red', s=10)  # Red dots on true pixels
+    # plt.title(f'Slice {slice_index + 1} with Mask Points')
+    # plt.xlabel('X')
+    # plt.ylabel('Y')
+    # plt.show()
+    
+    # return
+    
+    img = pixel_matrix_binned
     img[mask] = 0
 
     # plt.imshow(img[6,:,:], cmap='gray')
@@ -178,7 +207,9 @@ def extractData(InputDicomFolder, OutputLocation):
        
        
         plt.imsave( rf"W:\strahlenklinik\science\Physik\Arkaniva\Prostataexport Arkaniva Sarkar\Test\{ InputDicomFolder.split('\\')[-1]}.png", img[6,:,:] , cmap='gray')   
-
+        
+        
+    return
     #print(plus_centers)
     
     # coords=[]
@@ -230,11 +261,11 @@ def extractData(InputDicomFolder, OutputLocation):
     
     
         
-    return
+    # return
    
 
-    # Transpose array to [X, Y, Z] for saving as NifTI using nibabel
-    pixel_matrix_ras = np.transpose(pixel_matrix, (2, 1, 0))  # [Z, Y, X] → [X, Y, Z]
+    # # Transpose array to [X, Y, Z] for saving as NifTI using nibabel
+    # pixel_matrix_ras = np.transpose(pixel_matrix, (2, 1, 0))  # [Z, Y, X] → [X, Y, Z]
 
     # Save as NIfTI
     #nifti_image = nib.Nifti1Image(pixel_matrix_ras, affine_ras)
@@ -243,7 +274,11 @@ def extractData(InputDicomFolder, OutputLocation):
 
     
     
-    return
+    with open(r'C:\Users\sarkaraa\Downloads\roi_mapping.json', "r") as f:
+        roi_dict = json.load(f)
+
+    # Example: print the dictionary or use it
+    
 
     # Load RT-STRUCT DICOM file to extract anatomy contours
     try:
@@ -258,6 +293,12 @@ def extractData(InputDicomFolder, OutputLocation):
     # Get ROI contours
     for i,roi in enumerate(rt_struct.StructureSetROISequence):
         roi_name = roi.ROIName
+        
+        if roi_name not in roi_dict.keys():
+            print(roi_name)
+            print(f'ROI name not matched: {InputDicomFolder}')
+        
+        break
         contours =  rt_struct.ROIContourSequence[i].ContourSequence
 
         # Pre-allocate memory for binary mask
@@ -325,7 +366,7 @@ def extractData(InputDicomFolder, OutputLocation):
         # roi_name = roi_name.replace('/', '-').replace('\\', '-').replace('?', '-')
         # nib.save(nifti_img,f'{OutputLocation}\\{roi_name}.nii')
         
-        
+    return
 
     # Load DICOM file with needle coordinates
 
@@ -441,7 +482,7 @@ if __name__ == '__main__':
         
         extractData(f'{SeriesUIDFolders}\\{seriesFolder}', f'{OutputFolder}\\{seriesFolder}')
         
-        # break
+        break
 
     
 
