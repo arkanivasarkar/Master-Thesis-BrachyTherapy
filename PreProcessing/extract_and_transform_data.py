@@ -5,11 +5,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import nibabel as nib
 import pydicom
-from skimage.draw import polygon2mask
-from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import distance_transform_edt, binary_dilation, convolve
 from collections import defaultdict
-from skimage.util.shape import view_as_windows
-
 
 def signed_distance(mask):
     mask = (mask > 0).astype(np.uint8)
@@ -17,186 +14,154 @@ def signed_distance(mask):
     dist_in = distance_transform_edt(mask == 1)
     return dist_in - dist_out
 
-
-   
-
 def filter_collinear_points(points):
-    'From a set of points. keep only points which are collinear for minimum n points'
-    x_groups = defaultdict(list)  # points with the same x
-    y_groups = defaultdict(list)  # points with the same y
+    """
+    From a set of (x,y) points, keep only those points lying in
+    vertical or horizontal lines with at least 8 points.
+    """
+    x_groups = defaultdict(list)
+    y_groups = defaultdict(list)
 
     for x, y in points:
         x_groups[x].append((x, y))
         y_groups[y].append((x, y))
 
     result = set()
-
     for group in x_groups.values():
-        if len(group) > 8: # atleast 8 points need to be collinear
+        if len(group) > 8:
             result.update(group)
-
     for group in y_groups.values():
-        if len(group) > 8:  # atleast 8 points need to be collinear
+        if len(group) > 8:
             result.update(group)
 
-    return np.array(list(result))
-
-
-
-def mark_out_neighbors(grid, x, y):
-        rows = len(grid)
-        cols = len(grid[0]) if rows > 0 else 0
-
-        directions = [(-1, 0), (1, 0), (0, -1), (0, 1), (0,0)]  # up, down, left, right
-        
-        directions = [
-        (-1, -1), (-1, 0), (-1, 1),
-        ( 0, -1),  (0,0),  ( 0, 1),
-        ( 1, -1), ( 1, 0), ( 1, 1)
-        ]  
-
-
-        for dx, dy in directions:
-            nx, ny = x + dx, y + dy
-
-            if 0 <= nx < rows and 0 <= ny < cols:
-                grid[nx][ny] = -1
-        return grid
-    
-
-def apply_3x3_average(image, x, y):
-            rows, cols = image.shape
-            kernel_values = []
-
-            for dx in [-1, 0, 1]:
-                for dy in [-1, 0, 1]:
-                    nx, ny = x + dx, y + dy
-                    if 0 <= nx < rows and 0 <= ny < cols and image[nx, ny]!=-1:
-                        kernel_values.append(image[nx, ny])
-
-            # Compute average and assign to center pixel
-            if kernel_values:
-                image[x, y] = np.mean(kernel_values)
-                
-            return image
-        
-        
-
+    if result:
+        return np.array(list(result))
+    else:
+        # Return empty array of shape (0,2)
+        return np.zeros((0, 2), dtype=int)
 
 def extractData(InputDicomFolder, OutputLocation):
-
-    # Load US image volume from DICOM folder and extract relevant metadata
+    """
+    Load DICOM series from InputDicomFolder, process pixel volume by:
+    - bin intensities
+    - detect “plus” grid markers, remove them (mark neighbors)
+    - fill marked pixels by iterative 3×3 neighbor averaging
+    - (other processing, saving, etc.)
+    """
+    # 1. Load DICOM files
     image_slices_filenames = glob.glob(os.path.join(InputDicomFolder, "US*"))
-
-    # Read all DICOM files in the directory
-    files = [(pydicom.dcmread(filename),filename) for filename in image_slices_filenames]
-
-    # Sort the DICOM files by ImagePositionPatient to ensure correct slice order
-    files.sort(key=lambda x: int(x[0].ImagePositionPatient[2]))
-
+    files = [(pydicom.dcmread(filename), filename) for filename in image_slices_filenames]
+    # Sort by slice position (assumed in ImagePositionPatient[2])
+    files.sort(key=lambda x: float(x[0].ImagePositionPatient[2]))
     dicom_files = [item[0] for item in files]
     sorted_filenames = [item[1] for item in files]
-   
-    # # Get slice z-positions
+
+    # Metadata (orientation, affine) – kept as before
     z_positions = [float(ds.ImagePositionPatient[2]) for ds in dicom_files]
-
-
-    # Orientation vectors
     x_cosine = np.array(dicom_files[0].ImageOrientationPatient[0:3])
     y_cosine = np.array(dicom_files[0].ImageOrientationPatient[3:6])
     z_cosine = np.cross(x_cosine, y_cosine)
-
-
-    # Origin
     origin = [float(val) for val in dicom_files[0].ImagePositionPatient]
-    
-
-    # Affine matrix
     affine = np.eye(4)
     affine[:3, 0] = x_cosine * dicom_files[0].PixelSpacing[0]
     affine[:3, 1] = y_cosine * dicom_files[0].PixelSpacing[1]
     affine[:3, 2] = z_cosine * dicom_files[0].SliceThickness
     affine[:3, 3] = dicom_files[0].ImagePositionPatient
-
-
-    # Convert LPS → RAS for NIfTI compliance
+    # Convert LPS→RAS
     lps_to_ras = np.diag([-1, -1, 1, 1])
     affine_ras = lps_to_ras @ affine
 
-    # Extract pixel matrix
-    
-    pixel_arrays = [ds.pixel_array for ds in dicom_files] 
-    pixel_matrix = np.stack(pixel_arrays, axis=0, dtype=np.int16) # [Z,Y,X] or [slice, column, row]
-    
+    # 2. Stack pixel arrays
+    pixel_arrays = [ds.pixel_array for ds in dicom_files]
+    # Cast to float32 early so that averaging works without repeated casting
+    pixel_matrix = np.stack(pixel_arrays, axis=0).astype(np.float32)  # shape [Z, Y, X]
     original = pixel_matrix.copy()
-    
-    
-    
-    # Bin intensities in factors of 5 for easier denoising
+
+    # 3. Bin intensities in factors of 5
     bin_size = 5
-    pixel_matrix_binned = (pixel_matrix.copy() // bin_size) * bin_size
-    
-    
-    # Denoise Hand-drawn prostate contour (observed that it is always 255 after binning)
-    mask = pixel_matrix_binned == 255
-    pixel_matrix[mask] = -1 # Mark the contour pixels
-    
-    # Kernel to filter individual grid element which is plus shaped
-    plus_kernel = np.array([[0, 1, 0],
-                        [1, 1, 1],
-                        [0, 1, 0]], dtype=np.uint8)    
-    plus_indices = np.argwhere(plus_kernel) # Get indices of non-zero elements in the kernel
-    
-    
-    # Mark grid positions in the slices
-    for sliceIndx in range(pixel_matrix.shape[0]):
-        current_slice = pixel_matrix_binned[sliceIndx,:,:]
+    # Create a binned version for detection, but keep pixel_matrix float for processing
+    pixel_matrix_binned = (pixel_matrix.astype(np.int32) // bin_size) * bin_size
 
-        # Extract 3x3 sliding windows over the image slice
-        windows = view_as_windows(current_slice, (3, 3))
+    # 4. Mark hand-drawn prostate contour: pixels equal to 255 after binning
+    mask_contour = (pixel_matrix_binned == 255)
+    pixel_matrix[mask_contour] = -1  # mark as “bad”
 
-        # Initialize mask for detected plus centers
-        result_mask = np.zeros_like(current_slice, dtype=bool)
-        plus_centers = []
-        
-        # Loop over valid positions in the image
-        for i in range(windows.shape[0]):
-            for j in range(windows.shape[1]):
-                patch = windows[i, j]
-                values = patch[plus_kernel == 1]
-                if np.all(values == values[0]) and 200 <= values[0] <= 255:
-                    center_y, center_x = i + 1, j + 1  # center of 3x3 patch
-                    plus_centers.append((center_x, center_y))  # x first for plotting
-                    
-                    # Mark the 5 corresponding positions as True
-                    for dy, dx in plus_indices:
-                        result_mask[i + dy, j + dx] = True
-            
-        plus_centers = np.array(plus_centers)
-        
-        plus_centers = filter_collinear_points(plus_centers) # keep only collinear points
-        
-        for pt in plus_centers:
-            pixel_matrix[sliceIndx,:,:] = mark_out_neighbors(pixel_matrix[sliceIndx,:,:], pt[1], pt[0])
-    
-    directions = [
-            (-1, -1), (-1, 0), (-1, 1),
-            ( 0, -1),  (0,0),  ( 0, 1),
-            ( 1, -1), ( 1, 0), ( 1, 1)
-            ]  
-    
-    print('Starting fill...')
-    for sliceIndx in range(pixel_matrix.shape[0]):
-        indices = np.argwhere(pixel_matrix[sliceIndx,:,:]==-1)
-      
-        for pt in indices:        
-            for _ in range(3):
-                for dx, dy in directions:
-                    nx, ny = pt[1] + dx, pt[0] + dy
-                    if 0 <= nx < pixel_matrix.shape[2] and 0 <= ny < pixel_matrix.shape[1]:
-                        pixel_matrix[sliceIndx,:,:] = apply_3x3_average(pixel_matrix[sliceIndx,:,:], ny,nx)
-                    
-    
+    # Precompute kernels for later use
+    # Kernel for convolution-based averaging: 3x3 of ones
+    avg_kernel = np.ones((3, 3), dtype=np.float32)
+
+    # Structure element for dilation: 3x3 full ones
+    dilation_structure = np.ones((3, 3), dtype=bool)
+
+    # 5. Iterate over slices to detect plus-shaped grid markers and mark neighbors
+    num_slices, H, W = pixel_matrix.shape
+    print("Starting plus-shaped marker detection and removal...")
+    for slice_idx in range(num_slices):
+        current_binned = pixel_matrix_binned[slice_idx]  # int array
+        # We want to detect at positions where central pixel and its up/down/left/right
+        # are equal and in [200,255].
+        # Use slicing to compute boolean mask for centers:
+        # Define:
+        #   center = current_binned[1:-1, 1:-1]
+        #   up = current_binned[:-2, 1:-1], down = current_binned[2:, 1:-1]
+        #   left = current_binned[1:-1, :-2], right = current_binned[1:-1, 2:]
+        # Then mask_center = (center == up) & (center == down) & (center == left) & (center == right) & (center >= 200) & (center <= 255)
+        if H < 3 or W < 3:
+            # too small to detect plus shapes
+            continue
+        center = current_binned[1:-1, 1:-1]
+        up = current_binned[:-2, 1:-1]
+        down = current_binned[2:, 1:-1]
+        left = current_binned[1:-1, :-2]
+        right = current_binned[1:-1, 2:]
+        mask_center = (center == up) & (center == down) & (center == left) & (center == right) & (center >= 200) & (center <= 255)
+        # mask_center is shape (H-2, W-2). Get coordinates of True
+        centers = np.argwhere(mask_center)
+        # Convert to full-coord (x,y): note argwhere gives [i,j] on mask_center; full coords are (i+1,j+1)
+        if centers.size == 0:
+            continue
+        # Build array of (x,y) points for filter_collinear_points: x is column index, y is row index
+        plus_points = np.stack([centers[:, 1] + 1, centers[:, 0] + 1], axis=1)  # shape (N,2)
+        # Filter only collinear sets
+        plus_points = filter_collinear_points(plus_points)
+        if plus_points.size == 0:
+            continue
+        # Build a boolean mask of centers to dilate. We'll mark neighbors of these points.
+        # Initialize empty mask of shape HxW
+        center_mask = np.zeros((H, W), dtype=bool)
+        # Mark centers:
+        # plus_points rows: [x, y] pairs: x is col, y is row
+        # So center_mask[y, x] = True
+        center_mask[plus_points[:, 1], plus_points[:, 0]] = True
+        # Dilate by 3x3 to mark neighbors including diagonals
+        dilated = binary_dilation(center_mask, structure=dilation_structure)
+        # Mark these positions in pixel_matrix as -1
+        pixel_matrix[slice_idx][dilated] = -1
+
+    # 6. Iterative 3×3 averaging (“fill”) for marked pixels
+    # For each slice, do 3 iterations: for all pixels == -1, compute average of non-(-1) neighbors.
+    print("Starting fill by 3×3 averaging...")
+    for slice_idx in range(num_slices):
+        slice_img = pixel_matrix[slice_idx]
+        # If no -1 in slice, skip
+        if not np.any(slice_img == -1):
+            continue
+        for it in range(3):
+            bad_mask = (slice_img == -1)
+            if not np.any(bad_mask):
+                break
+            valid_mask = ~bad_mask
+            # sum of neighbors (including center if valid) via convolution
+            # For invalid positions, we set value to zero in the convolution input, but since valid_mask excludes them in count, zeros don't skew the average
+            sum_neighbors = convolve(np.where(valid_mask, slice_img, 0.0), avg_kernel, mode='constant', cval=0.0)
+            count_neighbors = convolve(valid_mask.astype(np.int32), avg_kernel, mode='constant', cval=0)
+            # Avoid division by zero: only update positions where bad_mask is True and count_neighbors > 0
+            update_positions = bad_mask & (count_neighbors > 0)
+            # Compute average only for these positions
+            slice_img[update_positions] = sum_neighbors[update_positions] / count_neighbors[update_positions]
+            # After assignment, some previously bad pixels become valid next iteration
+        # Assign back
+        pixel_matrix[slice_idx] = slice_img
     
 
            
@@ -207,10 +172,7 @@ def extractData(InputDicomFolder, OutputLocation):
     img1 = original.astype(np.uint8)
     img2 = pixel_matrix.astype(np.uint8)
     
-    plt.imshow(img1[10,:,:],cmap='gray')
-    plt.show()
-    plt.imshow(img2[10,:,:],cmap='gray')
-    plt.show()
+    
 
     # Compute PSNR
     psnr_value = peak_signal_noise_ratio(img1, img2)
@@ -222,11 +184,11 @@ def extractData(InputDicomFolder, OutputLocation):
     print(f"SSIM: {ssim_value:.4f}")
     
     # # Transpose array to [X, Y, Z] for saving as NifTI using nibabel
-    pixel_matrix_ras = np.transpose(original, (2, 1, 0))  # [Z, Y, X] → [X, Y, Z]
+    pixel_matrix_ras = np.transpose(pixel_matrix, (2, 1, 0))  # [Z, Y, X] → [X, Y, Z]
 
     # Save as NIfTI
-    nifti_image = nib.Nifti1Image(pixel_matrix_ras, affine_ras)
-    nib.save(nifti_image, 'image.nii')
+    nifti_image = nib.Nifti1Image(pixel_matrix_ras.astype(np.uint8), affine_ras)
+    nib.save(nifti_image, 'image2.nii')
     # nib.save(nifti_image, f'{OutputLocation}\\image.nii')
     
     return
