@@ -149,110 +149,66 @@ def extractData(InputDicomFolder, OutputLocation):
         # Close the hull for plotting
         hull_points = np.vstack([hull_points, hull_points[0]])
 
-        cropping_slice = pixel_matrix[slice_idx].copy()
-
-        min_x = int(np.floor(np.min(hull_points[:, 0])))
-        max_x = int(np.ceil(np.max(hull_points[:, 0])))
-        min_y = int(np.floor(np.min(hull_points[:, 1])))
-        max_y = int(np.ceil(np.max(hull_points[:, 1])))
-
-        cropping_slice[:min_y, :] = 255
-        cropping_slice[max_y:, :] = 255
-        cropping_slice[min_y:max_y, :min_x] = 255
-        cropping_slice[min_y:max_y, max_x:] = 255
-
-        idx = np.where(hull_points[:, 0] == hull_points[:, 0].min())
-        hull_points[idx,0] = hull_points[idx,0] - 20
-
-        idx = np.where(hull_points[:, 0] == hull_points[:, 0].max())
-        hull_points[idx,0] = hull_points[idx,0] + 20
-
-        idx = np.where(hull_points[:, 1] == hull_points[:, 1].min())
-        hull_points[idx,1] = hull_points[idx,1] - 20
-
-        idx = np.where(hull_points[:, 1] == hull_points[:, 1].max())
-        hull_points[idx,1] = cropping_slice.shape[0]
-        # hull_points[idx,1] = hull_points[idx,1] + 20
-
-        min_x2 = int(np.floor(np.min(hull_points[:, 0])))
-        max_x2 = int(np.ceil(np.max(hull_points[:, 0])))
-        min_y2 = int(np.floor(np.min(hull_points[:, 1])))
-        max_y2 = int(np.ceil(np.max(hull_points[:, 1])))
-
-        cropping_slice2 = pixel_matrix[slice_idx].copy()
-
-        cropping_slice2[:min_y2, :] = 255
-        cropping_slice2[max_y2:, :] = 255
-        cropping_slice2[min_y2:max_y2, :min_x2] = 255
-        cropping_slice2[min_y2:max_y2, max_x2:] = 255
-
-    
+        slice_copy_1 = pixel_matrix[slice_idx].copy()
         
 
-        subtract = cropping_slice2-cropping_slice
+        inner_boundary_min_x = int(np.floor(np.min(hull_points[:, 0])))
+        inner_boundary_max_x = int(np.ceil(np.max(hull_points[:, 0])))
+        inner_boundary_min_y = int(np.floor(np.min(hull_points[:, 1])))
+        inner_boundary_max_y = int(np.ceil(np.max(hull_points[:, 1])))
 
-        from skimage import data, filters, color
-        threshold = filters.threshold_otsu(subtract)
+        outer_boundary_min_x = inner_boundary_min_x-20
+        outer_boundary_max_x = inner_boundary_max_x+20
+        outer_boundary_min_y = inner_boundary_min_y-20
+        outer_boundary_max_y = inner_boundary_max_y+20
 
-        # Apply the threshold
-        binary_image = subtract > threshold
+        slice_copy_1[inner_boundary_min_y:inner_boundary_max_y, inner_boundary_min_x:inner_boundary_max_x] = 0
+        # slice_copy_1[inner_boundary_max_y:, :] = 255
+        # slice_copy_1[inner_boundary_max_y:inner_boundary_max_y, :inner_boundary_min_x] = 255
+        # slice_copy_1[inner_boundary_max_y:inner_boundary_max_y, inner_boundary_max_x:] = 255
 
-         # Get coordinates of nonzero pixels in (row, col) order
-        binary_coords = np.column_stack(np.where(binary_image))
+        slice_copy_2 = slice_copy_1.copy()
+        slice_copy_2[:outer_boundary_min_y, :] = 0
+        slice_copy_2[outer_boundary_max_y:, :] = 0
+        slice_copy_2[outer_boundary_min_y:outer_boundary_max_y, :outer_boundary_min_x] = 0
+        slice_copy_2[outer_boundary_min_y:outer_boundary_max_y, outer_boundary_max_x:] = 0
 
-        # If plus_points are (x, y), convert binary_coords to (x, y)
-        binary_coords_xy = binary_coords[:, [1, 0]]
+        
+        from skimage import data, filters, color,morphology
+        from scipy import ndimage
+        edges = filters.sobel(slice_copy_2)
+        # edges = slice_copy_2
+        threshold = filters.threshold_otsu(edges)
 
-        # Add these coordinates to plus_points (plus centers)
-        all_plus_centers = np.vstack([plus_points, binary_coords_xy])
+        # # Apply the threshold
+        binary_image = edges > threshold
 
-        # Set pixel values at all_plus_centers to -1 in the dilated region
-        # Make sure to use (row, col) order for indexing
-        rows = all_plus_centers[:, 1]
-        cols = all_plus_centers[:, 0]
-        pixel_matrix[slice_idx][rows, cols] = -1
+        binary_image = ndimage.binary_fill_holes(binary_image)
 
+        plus_points_new = np.column_stack(np.where(binary_image))
 
-        pixel_matrix[slice_idx][min_y:max_y, min_x:max_x] = cropping_slice[min_y:max_y, min_x:max_x] 
-        pixel_matrix[slice_idx][:min_y2, :] = original[slice_idx][:min_y2, :]
-        pixel_matrix[slice_idx][max_y2:, :] = original[slice_idx][max_y2:, :]
-        pixel_matrix[slice_idx][min_y2:max_y2, :min_x2] = original[slice_idx][min_y2:max_y2, :min_x2]
-        pixel_matrix[slice_idx][min_y2:max_y2, max_x2:] = original[slice_idx][min_y2:max_y2, max_x2:]
-       
+        plus_points = np.vstack([plus_points, plus_points_new])
 
-
-        # plt.figure(figsize=(6, 6))
-        # plt.imshow(pixel_matrix[slice_idx], cmap='gray')
-        # plt.show()
-
-
-
-        # Plot
-        # plt.figure(figsize=(6, 6))
-        # plt.imshow(cropping_slice2-cropping_slice, cmap='gray')
-        # plt.plot(hull_points[:, 0], hull_points[:, 1], 'r-', linewidth=2, label='Convex Hull')
-        # plt.scatter(plus_points[:, 0], plus_points[:, 1], c='b', s=20, label='Plus Points')
-        # plt.title(f'Convex Hull of Plus Points on Slice {slice_idx}')
-        # # plt.legend()
-        # plt.show()
 
         # Build a boolean mask of centers to dilate. We'll mark neighbors of these points.
         # Initialize empty mask of shape HxW
         center_mask = np.zeros((H, W), dtype=bool)
 
-
-        # Mark centers:
+         # Mark centers:
         # plus_points rows: [x, y] pairs: x is col, y is row
         # So center_mask[y, x] = True
         center_mask[plus_points[:, 1], plus_points[:, 0]] = True
+
         # Dilate by 3x3 to mark neighbors including diagonals
         dilated = binary_dilation(center_mask, structure=dilation_structure)
-        # Mark these positions in pixel_matrix as -1
-        pixel_matrix[slice_idx][dilated] = -1
 
         # plt.figure(figsize=(6, 6))
-        # plt.imshow(pixel_matrix[slice_idx], cmap='gray')
+        # plt.imshow(dilated, cmap='binary')
+
         # plt.show()
+
+        # Mark these positions in pixel_matrix as -1
+        pixel_matrix[slice_idx][dilated] = -1
 
 
         
@@ -282,8 +238,6 @@ def extractData(InputDicomFolder, OutputLocation):
         # Assign back
         pixel_matrix[slice_idx] = slice_img
     
- 
-
 
            
        
@@ -306,7 +260,6 @@ def extractData(InputDicomFolder, OutputLocation):
     
     # # Transpose array to [X, Y, Z] for saving as NifTI using nibabel
     pixel_matrix_ras = np.transpose(pixel_matrix, (2, 1, 0))  # [Z, Y, X] → [X, Y, Z]
-
 
     # Save as NIfTI
     nifti_image = nib.Nifti1Image(pixel_matrix_ras.astype(np.uint8), affine_ras)
