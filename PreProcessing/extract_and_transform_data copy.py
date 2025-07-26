@@ -2,271 +2,113 @@ import os
 import glob
 import json
 import numpy as np
-import matplotlib.pyplot as plt
 import nibabel as nib
 import pydicom
-from scipy.ndimage import distance_transform_edt, binary_dilation, convolve
-from collections import defaultdict
+from scipy.ndimage import distance_transform_edt, convolve, binary_dilation
+from skimage.metrics import peak_signal_noise_ratio, structural_similarity
+from skimage import filters
+from collections import Counter
 
-def signed_distance(mask):
-    mask = (mask > 0).astype(np.uint8)
-    dist_out = distance_transform_edt(mask == 0)
-    dist_in = distance_transform_edt(mask == 1)
+def signed_distance(mask: np.ndarray) -> np.ndarray:
+    binary = mask.astype(bool)
+    dist_in = distance_transform_edt(binary)
+    dist_out = distance_transform_edt(~binary)
     return dist_in - dist_out
 
-def filter_collinear_points(points):
-    """
-    From a set of (x,y) points, keep only those points lying in
-    vertical or horizontal lines with at least 8 points.
-    """
-    x_groups = defaultdict(list)
-    y_groups = defaultdict(list)
 
-    for x, y in points:
-        x_groups[x].append((x, y))
-        y_groups[y].append((x, y))
-
-    result = set()
-    for group in x_groups.values():
-        if len(group) > 8:
-            result.update(group)
-    for group in y_groups.values():
-        if len(group) > 8:
-            result.update(group)
-
-    if result:
-        return np.array(list(result))
-    else:
-        # Return empty array of shape (0,2)
-        return np.zeros((0, 2), dtype=int)
-
-def extractData(InputDicomFolder, OutputLocation):
-    """
-    Load DICOM series from InputDicomFolder, process pixel volume by:
-    - bin intensities
-    - detect “plus” grid markers, remove them (mark neighbors)
-    - fill marked pixels by iterative 3×3 neighbor averaging
-    - (other processing, saving, etc.)
-    """
-    # 1. Load DICOM files
-    image_slices_filenames = glob.glob(os.path.join(InputDicomFolder, "US*"))
-    files = [(pydicom.dcmread(filename), filename) for filename in image_slices_filenames]
-
-    # Sort by slice position (assumed in ImagePositionPatient[2])
-    files.sort(key=lambda x: float(x[0].ImagePositionPatient[2]))
-    dicom_files = [item[0] for item in files]
-    sorted_filenames = [item[1] for item in files]
-
-    # Metadata (orientation, affine) – kept as before
-    z_positions = [float(ds.ImagePositionPatient[2]) for ds in dicom_files]
-    x_cosine = np.array(dicom_files[0].ImageOrientationPatient[0:3])
-    y_cosine = np.array(dicom_files[0].ImageOrientationPatient[3:6])
-    z_cosine = np.cross(x_cosine, y_cosine)
+def filter_collinear(points: np.ndarray, min_span: int = 8) -> np.ndarray:
+    # vectorized grouping via counts
+    xs, ys = points[:, 0], points[:, 1]
+    x_counts = Counter(xs)
+    y_counts = Counter(ys)
+    mask = np.array([x_counts[x] > min_span or y_counts[y] > min_span for x, y in points])
+    return points[mask]
 
 
-    # Origin in patient coordinates
-    # Note: ImagePositionPatient is in LPS (Left-Posterior-Superior) coordinate system
-    # We will convert to RAS (Right-Anterior-Superior) later
-    origin = [float(val) for val in dicom_files[0].ImagePositionPatient]
+def detect_plus_mask(binned: np.ndarray, lo=200, hi=255) -> np.ndarray:
+    # cross-shaped kernel convolution to detect plus markers
+    kernel = np.array([[0,1,0], [1,1,1], [0,1,0]], dtype=int)
+    matches = convolve(((binned >= lo) & (binned <= hi)).astype(int), kernel, mode='constant')
+    # center plus neighbors => sum must be 5
+    centers = (matches == 5)
+    # remove border
+    centers[[0,-1], :] = False
+    centers[:, [0,-1]] = False
+    return centers
+
+
+def fast_fill(slice_img: np.ndarray, kernel: np.ndarray, iterations: int = 3) -> None:
+    bad = slice_img < 0
+    if not bad.any():
+        return
+    for _ in range(iterations):
+        bad = slice_img < 0
+        if not bad.any(): break
+        sums = convolve(np.where(~bad, slice_img, 0.0), kernel, mode='constant')
+        counts = convolve((~bad).astype(float), kernel, mode='constant')
+        update = bad & (counts > 0)
+        slice_img[update] = (sums[update] / counts[update])
+
+
+def extractData(input_folder: str, output_path: str) -> None:
+    # load DICOM series
+    paths = sorted(glob.glob(os.path.join(input_folder, 'US*')),
+                   key=lambda p: float(pydicom.dcmread(p).ImagePositionPatient[2]))
+    dicoms = [pydicom.dcmread(p) for p in paths]
+    # build affine
+    first = dicoms[0]
+    x_cos, y_cos = np.array(first.ImageOrientationPatient[:3]), np.array(first.ImageOrientationPatient[3:6])
+    z_cos = np.cross(x_cos, y_cos)
     affine = np.eye(4)
-    affine[:3, 0] = x_cosine * dicom_files[0].PixelSpacing[0]
-    affine[:3, 1] = y_cosine * dicom_files[0].PixelSpacing[1]
-    affine[:3, 2] = z_cosine * dicom_files[0].SliceThickness
-    affine[:3, 3] = dicom_files[0].ImagePositionPatient
+    affine[:3,0] = x_cos * first.PixelSpacing[0]
+    affine[:3,1] = y_cos * first.PixelSpacing[1]
+    affine[:3,2] = z_cos * first.SliceThickness
+    affine[:3,3] = first.ImagePositionPatient
+    affine_ras = np.diag([-1,-1,1,1]) @ affine
 
-    
-    # Convert LPS→RAS
-    lps_to_ras = np.diag([-1, -1, 1, 1])
-    affine_ras = lps_to_ras @ affine
+    # stack pixel data
+    volume = np.stack([ds.pixel_array for ds in dicoms], axis=0).astype(np.float32)
+    orig = volume.copy()
 
-    # 2. Stack pixel arrays
-    pixel_arrays = [ds.pixel_array for ds in dicom_files]
+    # bin intensities
+    binned = (volume.astype(int) // 5) * 5
+    # mark contours
+    volume[binned == 255] = -1
 
-    # Cast to float32 early so that averaging works without repeated casting
-    pixel_matrix = np.stack(pixel_arrays, axis=0).astype(np.float32)  # shape [Z, Y, X]
-    original = pixel_matrix.copy()
+    # detection and marking
+    kernel_cross = np.ones((3,3), dtype=np.uint8)
+    for z in range(volume.shape[0]):
+        centers = detect_plus_mask(binned[z])
+        if not centers.any(): continue
+        coords = np.column_stack(np.where(centers))
+        # filter linearly
+        pts = np.stack([coords[:,1], coords[:,0]], axis=1)
+        pts = filter_collinear(pts)
+        if pts.size == 0: continue
+        # dilate and mark
+        mask = np.zeros_like(centers)
+        mask[coords[:,0], coords[:,1]] = True
+        mask = binary_dilation(mask, structure=np.ones((3,3)))
+        volume[z][mask] = -1
 
-    
+    # fill holes
+    avg_kernel = np.ones((3,3), dtype=np.float32)
+    for z in range(volume.shape[0]):
+        fast_fill(volume[z], avg_kernel)
 
-    # 3. Bin intensities in factors of 5
-    bin_size = 5
-    # Create a binned version for detection, but keep pixel_matrix float for processing
-    pixel_matrix_binned = (pixel_matrix.astype(np.int32) // bin_size) * bin_size
+    # quality metrics
+    psnr = peak_signal_noise_ratio(orig.astype(np.uint8), volume.astype(np.uint8))
+    ssim = structural_similarity(orig.astype(np.uint8), volume.astype(np.uint8))
+    print(f"PSNR: {psnr:.2f}, SSIM: {ssim:.4f}")
 
-    # 4. Mark hand-drawn prostate contour: pixels equal to 255 after binning
-    mask_contour = (pixel_matrix_binned == 255)
-    pixel_matrix[mask_contour] = -1  # mark as “bad”
+    # save NIFTI
+    ras = np.transpose(volume, (2,1,0)).astype(np.uint8)
+    img = nib.Nifti1Image(ras.astype(np.uint8), affine_ras)
+    nib.save(img, 'image2.nii')
+    # nib.save(img, os.path.join(OutputLocation, "image.nii"))
 
-    # Precompute kernels for later use
-    # Kernel for convolution-based averaging: 3x3 of ones
-    avg_kernel = np.ones((3, 3), dtype=np.float32)
-
-    # Structure element for dilation: 3x3 full ones
-    dilation_structure = np.ones((3, 3), dtype=bool)
-
-    # 5. Iterate over slices to detect plus-shaped grid markers and mark neighbors
-    num_slices, H, W = pixel_matrix.shape
-    print("Starting plus-shaped marker detection and removal...")
-    for slice_idx in range(num_slices):
-        current_binned = pixel_matrix_binned[slice_idx]  # int array
-        # We want to detect at positions where central pixel and its up/down/left/right
-        # are equal and in [200,255].
-        # Use slicing to compute boolean mask for centers:
-        # Define:
-        #   center = current_binned[1:-1, 1:-1]
-        #   up = current_binned[:-2, 1:-1], down = current_binned[2:, 1:-1]
-        #   left = current_binned[1:-1, :-2], right = current_binned[1:-1, 2:]
-        # Then mask_center = (center == up) & (center == down) & (center == left) & (center == right) & (center >= 200) & (center <= 255)
-        if H < 3 or W < 3:
-            # too small to detect plus shapes
-            continue
-        center = current_binned[1:-1, 1:-1]
-        up = current_binned[:-2, 1:-1]
-        down = current_binned[2:, 1:-1]
-        left = current_binned[1:-1, :-2]
-        right = current_binned[1:-1, 2:]
-        mask_center = (center == up) & (center == down) & (center == left) & (center == right) & (center >= 200) & (center <= 255)
-        # mask_center is shape (H-2, W-2). Get coordinates of True
-        centers = np.argwhere(mask_center)
-        # Convert to full-coord (x,y): note argwhere gives [i,j] on mask_center; full coords are (i+1,j+1)
-        if centers.size == 0:
-            continue
-
-        # Build array of (x,y) points for filter_collinear_points: x is column index, y is row index
-        plus_points = np.stack([centers[:, 1] + 1, centers[:, 0] + 1], axis=1)  # shape (N,2)
-
-        # Filter only collinear sets
-        plus_points = filter_collinear_points(plus_points)
-        if plus_points.size == 0:
-            continue
-
-        
-        from scipy.spatial import ConvexHull
-        # Compute convex hull
-        hull = ConvexHull(plus_points)
-        hull_points = plus_points[hull.vertices]
-
-        # Close the hull for plotting
-        hull_points = np.vstack([hull_points, hull_points[0]])
-
-        slice_copy_1 = pixel_matrix[slice_idx].copy()
-        
-
-        inner_boundary_min_x = int(np.floor(np.min(hull_points[:, 0])))
-        inner_boundary_max_x = int(np.ceil(np.max(hull_points[:, 0])))
-        inner_boundary_min_y = int(np.floor(np.min(hull_points[:, 1])))
-        inner_boundary_max_y = int(np.ceil(np.max(hull_points[:, 1])))
-
-        outer_boundary_min_x = inner_boundary_min_x-20
-        outer_boundary_max_x = inner_boundary_max_x+20
-        outer_boundary_min_y = inner_boundary_min_y-20
-        outer_boundary_max_y = inner_boundary_max_y+20
-
-        slice_copy_1[inner_boundary_min_y:inner_boundary_max_y, inner_boundary_min_x:inner_boundary_max_x] = 0
-        # slice_copy_1[inner_boundary_max_y:, :] = 255
-        # slice_copy_1[inner_boundary_max_y:inner_boundary_max_y, :inner_boundary_min_x] = 255
-        # slice_copy_1[inner_boundary_max_y:inner_boundary_max_y, inner_boundary_max_x:] = 255
-
-        slice_copy_2 = slice_copy_1.copy()
-        slice_copy_2[:outer_boundary_min_y, :] = 0
-        slice_copy_2[outer_boundary_max_y:, :] = 0
-        slice_copy_2[outer_boundary_min_y:outer_boundary_max_y, :outer_boundary_min_x] = 0
-        slice_copy_2[outer_boundary_min_y:outer_boundary_max_y, outer_boundary_max_x:] = 0
-
-        
-        from skimage import data, filters, color,morphology
-        from scipy import ndimage
-        edges = filters.sobel(slice_copy_2)
-        # edges = slice_copy_2
-        threshold = filters.threshold_otsu(edges)
-
-        # # Apply the threshold
-        binary_image = edges > threshold
-
-        binary_image = ndimage.binary_fill_holes(binary_image)
-
-        plus_points_new = np.column_stack(np.where(binary_image))
-
-        plus_points = np.vstack([plus_points, plus_points_new])
-
-
-        # Build a boolean mask of centers to dilate. We'll mark neighbors of these points.
-        # Initialize empty mask of shape HxW
-        center_mask = np.zeros((H, W), dtype=bool)
-
-         # Mark centers:
-        # plus_points rows: [x, y] pairs: x is col, y is row
-        # So center_mask[y, x] = True
-        center_mask[plus_points[:, 1], plus_points[:, 0]] = True
-
-        # Dilate by 3x3 to mark neighbors including diagonals
-        dilated = binary_dilation(center_mask, structure=dilation_structure)
-
-        # plt.figure(figsize=(6, 6))
-        # plt.imshow(dilated, cmap='binary')
-
-        # plt.show()
-
-        # Mark these positions in pixel_matrix as -1
-        pixel_matrix[slice_idx][dilated] = -1
-
-
-        
-
-    # 6. Iterative 3×3 averaging (“fill”) for marked pixels
-    # For each slice, do 3 iterations: for all pixels == -1, compute average of non-(-1) neighbors.
-    print("Starting fill by 3×3 averaging...")
-    for slice_idx in range(num_slices):
-        slice_img = pixel_matrix[slice_idx]
-        # If no -1 in slice, skip
-        if not np.any(slice_img == -1):
-            continue
-        for it in range(3):
-            bad_mask = (slice_img == -1)
-            if not np.any(bad_mask):
-                break
-            valid_mask = ~bad_mask
-            # sum of neighbors (including center if valid) via convolution
-            # For invalid positions, we set value to zero in the convolution input, but since valid_mask excludes them in count, zeros don't skew the average
-            sum_neighbors = convolve(np.where(valid_mask, slice_img, 0.0), avg_kernel, mode='constant', cval=0.0)
-            count_neighbors = convolve(valid_mask.astype(np.int32), avg_kernel, mode='constant', cval=0)
-            # Avoid division by zero: only update positions where bad_mask is True and count_neighbors > 0
-            update_positions = bad_mask & (count_neighbors > 0)
-            # Compute average only for these positions
-            slice_img[update_positions] = sum_neighbors[update_positions] / count_neighbors[update_positions]
-            # After assignment, some previously bad pixels become valid next iteration
-        # Assign back
-        pixel_matrix[slice_idx] = slice_img
-    
-
-           
-       
-    from skimage.metrics import peak_signal_noise_ratio, structural_similarity
-   
-    # Load images as float (important for SSIM)
-    img1 = original.astype(np.uint8)
-    img2 = pixel_matrix.astype(np.uint8)
-    
-    
-
-    # Compute PSNR
-    psnr_value = peak_signal_noise_ratio(img1, img2)
-
-    # Compute SSIM
-    ssim_value = structural_similarity(img1, img2)
-
-    print(f"PSNR: {psnr_value:.2f} dB")
-    print(f"SSIM: {ssim_value:.4f}")
-    
-    # # Transpose array to [X, Y, Z] for saving as NifTI using nibabel
-    pixel_matrix_ras = np.transpose(pixel_matrix, (2, 1, 0))  # [Z, Y, X] → [X, Y, Z]
-
-    # Save as NIfTI
-    nifti_image = nib.Nifti1Image(pixel_matrix_ras.astype(np.uint8), affine_ras)
-    nib.save(nifti_image, 'image2.nii')
-    # nib.save(nifti_image, f'{OutputLocation}\\image.nii')
-    
     return
+
     
     
     with open(r'C:\Users\sarkaraa\Downloads\roi_mapping.json', "r") as f:

@@ -21,7 +21,8 @@ from skimage import data
 from skimage import color
 from skimage.morphology import extrema
 from skimage import exposure
-
+from skimage import filters
+from skimage.measure import label, regionprops
 
 
 
@@ -34,10 +35,190 @@ image_data = nifti_file.get_fdata()
 # View shape of data
 print(image_data.shape)
 
-img = image_data[:,:,6].T
 
-plt.imshow(img, cmap='gray')
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.cluster import KMeans, AgglomerativeClustering, DBSCAN, SpectralClustering, MeanShift, estimate_bandwidth
+from sklearn.mixture import GaussianMixture
+from skimage import filters
+
+# Prepare the 6th slice (Python index 5)
+slice_idx = 5
+img = image_data[:, :, slice_idx]
+img_flat = img.ravel().reshape(-1, 1)
+
+# 1. KMeans
+kmeans = KMeans(n_clusters=2, random_state=0)
+kmeans_labels = kmeans.fit_predict(img_flat.copy()).reshape(img.shape)
+
+
+
+# 3. DBSCAN
+dbscan = DBSCAN(eps=0.1, min_samples=5)
+dbscan_labels = dbscan.fit_predict(img_flat.copy()).reshape(img.shape)
+# DBSCAN may label noise as -1, so shift for display
+dbscan_labels_display = np.where(dbscan_labels == -1, 0, dbscan_labels)
+
+# 4. Spectral Clustering
+threshold = filters.threshold_yen(img.copy())
+mask = img.copy() > threshold
+print(mask.shape)
+spectral_labels = img*np.logical_not(mask).astype(int)
+print(spectral_labels.shape)
+# spectral = SpectralClustering(n_clusters=2, affinity='nearest_neighbors', assign_labels='kmeans', random_state=0)
+# spectral_labels = spectral.fit_predict(img_flat).reshape(img.shape)
+
+# 5. MeanShift
+bandwidth = estimate_bandwidth(img_flat.copy(), quantile=0.2, n_samples=500)
+meanshift = MeanShift(bandwidth=bandwidth, bin_seeding=True)
+meanshift_labels = meanshift.fit_predict(img_flat).reshape(img.shape)
+
+# 6. Gaussian Mixture Model
+gmm = GaussianMixture(n_components=2, random_state=0)
+gmm_labels = gmm.fit_predict(img_flat.copy()).reshape(img.shape)
+
+groundtruth = img
+
+# Plotting
+fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+axes = axes.ravel()
+
+titles = [
+    "KMeans",
+    "Spectral Clustering",
+    "DBSCAN",
+    "MeanShift",
+    "GMM"
+    'GT'
+]
+segmentations = [
+    kmeans_labels,
+    spectral_labels,
+    dbscan_labels_display,
+    meanshift_labels,
+    gmm_labels,
+    groundtruth
+]
+
+for ax, seg, title in zip(axes, segmentations, titles):
+    ax.imshow(seg, cmap='nipy_spectral')
+    ax.set_title(title)
+    ax.axis('off')
+
+plt.suptitle("Segmentation of 6th Slice by Various Clustering Methods", fontsize=16)
+plt.tight_layout()
 plt.show()
+exit()
+
+threshold = filters.threshold_yen(image_data)
+mask = image_data > threshold
+
+masked_pixels = image_data[mask]
+
+from sklearn.mixture import GaussianMixture
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Assume masked_pixels is a 1D array of pixel values under the mask
+X = masked_pixels.ravel().reshape(-1, 1)
+
+# Fit a Gaussian Mixture Model with 2 components (change n_components as needed)
+gmm = GaussianMixture(n_components=2, random_state=0)
+gmm.fit(X)
+
+# Predict the component for each pixel
+labels = gmm.predict(X)
+
+# Plot histogram with 256 bins
+# plt.figure(figsize=(6, 4))
+# plt.hist(X, bins=256, color='gray', alpha=0.5, label='Masked Pixels')
+
+# For each GMM component, plot mean, min, and max
+mins = []
+for i in range(gmm.n_components):
+    # Mean of the component
+    mean = gmm.means_[i, 0]
+    # All pixels assigned to this component
+    component_pixels = X[labels == i]
+    # Min and max of the component
+    comp_min = component_pixels.min()
+    print(f'GMM {i+1} Mean: {mean}, Min: {comp_min}')
+    mins.append(comp_min)
+    # comp_max = component_pixels.max()
+    # # Plot
+    # plt.axvline(mean, color='r', linestyle='--', label=f'GMM {i+1} Mean')
+    # plt.axvline(comp_min, color='b', linestyle=':', label=f'GMM {i+1} Min')
+    # plt.axvline(comp_max, color='m', linestyle=':', label=f'GMM {i+1} Max')
+
+# plt.title('GMM on Masked Pixels')
+# plt.xlabel('Pixel Value')
+# plt.ylabel('Frequency')
+# plt.legend()
+# plt.show()
+# # Plot histogram
+# plt.figure(figsize=(6, 4))
+# plt.hist(masked_pixels.ravel(), bins=256, color='blue', alpha=0.7)
+# plt.title('Histogram of Pixel Values Under Mask')
+# plt.xlabel('Pixel Value')
+# plt.ylabel('Frequency')
+# plt.show()
+
+# exit()
+print( np.max(mins))
+
+mask = image_data > np.max(mins)  # Use the minimum of the GMM components as the threshold
+
+mask = label(mask, connectivity=2)  # Use 2D connectivity for labeling
+
+
+
+
+
+img1 = mask[:,:,6].T
+
+plt.imshow(img1, cmap='jet')
+plt.show()
+
+
+
+
+exit()
+
+result_1 = filters.unsharp_mask(img, radius=1, amount=1, preserve_range=True)
+
+
+plt.imshow(result_1, cmap='gray')
+plt.show()
+
+fig, ax = filters.try_all_threshold(result_1,figsize=(18, 14), verbose=False)
+plt.tight_layout()
+plt.show()
+
+result_2 = filters.unsharp_mask(img, radius=5, amount=2, preserve_range=True)
+
+plt.imshow(result_2, cmap='gray')
+plt.show()
+
+fig, ax = filters.try_all_threshold(result_2,figsize=(18, 14), verbose=False)
+plt.tight_layout()
+plt.show()
+
+
+result_3 = filters.unsharp_mask(img, radius=20, amount=5, preserve_range=True)
+
+plt.imshow(result_3, cmap='gray')
+plt.show()
+
+fig, ax = filters.try_all_threshold(result_3,figsize=(18, 14), verbose=False)
+plt.tight_layout()
+plt.show()
+
+
+exit()
+
+
+
+######################################################################################
 
 import numpy as np
 from skimage import io, util
@@ -105,7 +286,7 @@ smoothened_img = filters.gaussian(img, sigma=1.5)
 
 # filtered_real_sum = img*1000
 
-filtered_real_sum =filters.laplace( smoothened_img)
+filtered_real_sum = smoothened_img
 
 plt.imshow(filtered_real_sum, cmap='gray')
 plt.show()
@@ -124,7 +305,7 @@ overlay = color.label2rgb(
 )
 
 # We observed in the previous image, that there are many local maxima
-h = 0.7
+h = 0.4
 h_maxima = extrema.h_maxima(filtered_real_sum, h)
 label_h_maxima = label(h_maxima)
 
