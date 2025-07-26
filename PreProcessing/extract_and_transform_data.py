@@ -472,7 +472,7 @@ def extractData(InputDicomFolder, OutputLocation):
             # print(points)
         
         
-        
+  #ARKA
 
     print(f"Number of reconstructed catheters: {len(catheter_reconstructed)}")
     
