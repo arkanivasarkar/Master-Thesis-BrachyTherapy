@@ -1,0 +1,47 @@
+name: Refactor with Gemini
+
+on:
+  push:
+    branches:
+      - main   # change branch if needed
+
+jobs:
+  refactor:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 2   # so we can access last commit message
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          pip install google-generativeai
+
+      - name: Run Gemini refactor
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          # find changed Python files in last commit
+          git diff --name-only HEAD~1 HEAD -- '*.py' > changed_files.txt
+          while IFS= read -r file; do
+            if [ -f "$file" ]; then
+              echo "Refactoring $file ..."
+              python GeminiCodeRefactor.py "$file"
+            fi
+          done < changed_files.txt
+
+      - name: Commit and push changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          last_msg=$(git log -1 --pretty=%B)
+          git add .
+          git commit -m "${last_msg} code refactored through gemini" || echo "No changes to commit"
+          git push
