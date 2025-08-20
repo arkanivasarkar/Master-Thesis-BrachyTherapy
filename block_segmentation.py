@@ -92,6 +92,7 @@ def segment_needle_slice(image, cluster_n=4):
     return image, membership, binary_mask
 
 
+
 # Number of needles to keep in the final segmentation
 NUM_NEEDLES = 11
 
