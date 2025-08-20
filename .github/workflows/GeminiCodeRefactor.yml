@@ -5,6 +5,9 @@ on:
     branches:
       - main   # change branch if needed
 
+permissions:
+  contents: write   # allow push back to repo
+
 jobs:
   refactor:
     runs-on: ubuntu-latest
@@ -13,7 +16,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v3
         with:
-          fetch-depth: 2   # so we can access last commit message
+          fetch-depth: 2
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -28,7 +31,6 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          # Get only Python files changed in the last commit
           git diff --name-only HEAD~1 HEAD -- '*.py' > changed_files.txt
 
           while IFS= read -r file; do
@@ -43,6 +45,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           last_msg=$(git log -1 --pretty=%B)
-          git add '*.py'
+
+          # Stage only modified Python files
+          git ls-files --modified '*.py' | xargs git add || true
+
           git commit -m "${last_msg} code refactored through gemini" || echo "No Python changes to commit"
           git push
